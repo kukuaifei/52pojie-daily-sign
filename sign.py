@@ -37,7 +37,7 @@ SHOT_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "debug")
 
 # 页面内一次性采集所有需要的信息，中文判断全在 JS 里完成
 PROBE_JS = r"""
-() => {
+(today) => {
   const CH = ['请完成安全验证', '验证码访问', 'Please enable JavaScript', 'waf_zw_verify', '访问验证'];
   const SIGN = /签到|打卡|每日|每天/;
   const OK = ['签到成功', '已签到', '已经签到', '任务完成', '恭喜', '获得', '领取成功', '奖励', '已完成', '申请成功', '您已经签到'];
@@ -45,6 +45,10 @@ PROBE_JS = r"""
   const FAIL = ['失败', '错误', '没有找到', '不存在', '无权', '禁止', '请先登录', '您需要先登录', '非法'];
 
   const body = document.body ? document.body.innerText : '';
+  // 页脚有 "GMT+8, 2026-11-20 16:08" 这类时间戳，会在任何页面命中当天日期，
+  // 所以"今天签过"必须在主内容区（#ct）里找，不能扫整页
+  const main = document.querySelector('#ct') || document.querySelector('#wp') || null;
+  const mainTxt = main ? (main.innerText || '') : '';
   const anchors = [...document.querySelectorAll('a[href]')];
   const rows = anchors.filter(a => /do=(apply|draw)/.test(a.href)).map(a => {
     const box = a.closest('tr') || a.parentElement || a;
@@ -62,6 +66,8 @@ PROBE_JS = r"""
     verify: location.href.indexOf('waf_text_verify') >= 0 || body.includes('验证码访问'),
     none: body.includes('暂无'),
     daily: body.includes('每日签到'),
+    // done 页只要历史完成过就永远含"每日签到"文字，必须配合当日日期（且只在主内容区）才能证明"今天签了"
+    today: !!(today && mainTxt && mainTxt.includes(today)),
     ok: OK.filter(w => body.includes(w)),
     already: ALREADY.filter(w => body.includes(w)),
     fail: FAIL.filter(w => body.includes(w)),
@@ -99,7 +105,7 @@ def shot(page, name):
     try:
         os.makedirs(SHOT_DIR, exist_ok=True)
         page.screenshot(path=os.path.join(SHOT_DIR, name + ".png"), full_page=False)
-        st = page.evaluate(PROBE_JS)
+        st = page.evaluate(PROBE_JS, today_str())
         with open(os.path.join(SHOT_DIR, name + ".json"), "w", encoding="utf-8") as f:
             import json
             json.dump(st, f, ensure_ascii=True, indent=1)
@@ -126,9 +132,13 @@ def cookies_for_playwright(d):
     } for k, v in d.items()]
 
 
+def today_str():
+    return datetime.now(TZ).strftime("%Y-%m-%d")
+
+
 def probe(page):
     try:
-        return page.evaluate(PROBE_JS)
+        return page.evaluate(PROBE_JS, today_str())
     except Exception:
         return None
 
@@ -312,12 +322,14 @@ def run(page, dry, force_id):
         for item in ("new", "doing", "done"):
             s2 = open_page(page, TASK_URL + "&item=" + item, item)
             pages[item] = s2 or {}
-            log("item=%-5s len=%s none=%s daily=%s" % (
-                item, pages[item].get("len"), pages[item].get("none"), pages[item].get("daily")))
-        if pages.get("done", {}).get("daily") or pages.get("new", {}).get("daily"):
-            return 0, "今日的任务已完成/已申请（每日签到红包任务），等下一期（相隔 24 小时）"
-        if pages.get("new", {}).get("none") or pages.get("doing", {}).get("none"):
-            return 0, "本期任务已完成或未开放（new/doing 均为空），按已签处理"
+            log("item=%-5s len=%s none=%s daily=%s today=%s" % (
+                item, pages[item].get("len"), pages[item].get("none"),
+                pages[item].get("daily"), pages[item].get("today")))
+        # done 页历史完成记录会一直挂着"每日签到红包任务"字样，只有同时出现当日日期才算今天签过
+        if pages.get("done", {}).get("today"):
+            return 0, "今日已完成（done 页含 %s 记录）" % today_str()
+        if pages.get("new", {}).get("none"):
+            return 0, "本期任务已申请或已完成（new 页无新任务），等下一期（相隔 24 小时）"
         return 1, "未找到签到任务入口（任务已申请过或本期未开放）"
 
     action, tid, name = target
