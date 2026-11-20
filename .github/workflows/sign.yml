@@ -1,0 +1,53 @@
+name: 52pojie daily sign
+
+on:
+  schedule:
+    # UTC 00:20 = 北京时间 08:20；GitHub 定时任务会延迟几分钟到半小时，属正常
+    - cron: "20 0 * * *"
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: "只探测不提交（不会真的签到）"
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+
+concurrency:
+  group: 52pojie-sign
+  cancel-in-progress: false
+
+jobs:
+  sign:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - name: 安装依赖与浏览器内核
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+          python -m patchright install --with-deps chromium || python -m playwright install --with-deps chromium
+
+      - name: 执行签到
+        env:
+          PJ52_COOKIE: ${{ secrets.PJ52_COOKIE }}
+          PJ52_DEBUG: "1"
+          PJ52_DRY_RUN: ${{ inputs.dry_run && '1' || '' }}
+        run: python sign.py
+
+      - name: 上传调试产物（截图 + HTML）
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: debug-${{ github.run_id }}
+          path: debug/
+          if-no-files-found: ignore
+          retention-days: 7
