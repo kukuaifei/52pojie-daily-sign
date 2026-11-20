@@ -99,6 +99,61 @@ python sign.py
 
 `debug/` 下会有每步截图和 JSON 快照（CI 里作为 artifact 上传，保留 7 天）。
 
+## Telegram 通知
+
+签到结果（成功 / 未知 / 失败）都会推到 Telegram，消息长这样：
+
+```
+✅ 52pojie 签到成功
+时间：2026-11-21 08:23:11
+结果：今日已完成（done 页含 2026-11-21 记录）
+查看运行日志            ← 链到本次 Actions run
+```
+
+### 一次配置
+
+1. Telegram 里找 **@BotFather** → `/newbot` → 起个名 → 拿到 `123456789:AAH...`。
+2. **给这个 bot 发一条 `/start`**（不发的话 bot 没法主动给你发消息，会报 `chat not found`）。
+3. 查自己的 chat id：找 **@userinfobot** 发条消息，它会回 `Id: 123456789`。
+4. 一条命令写完 secret 并触发测试：
+
+```powershell
+cd D:\deepseek-harness\软件破解\52pojie-actions
+.\setup_telegram.ps1
+```
+
+脚本会验 token、写两个 secret、跑一次 `test_notify`，几十秒后手机会收到「🧪 通知测试」。
+
+手动等价命令：
+
+```bash
+gh secret set TG_BOT_TOKEN --repo kukuaifei/52pojie-daily-sign --body "123456789:AAH..."
+gh secret set TG_CHAT_ID  --repo kukuaifei/52pojie-daily-sign --body "123456789"
+gh workflow run sign.yml --repo kukuaifei/52pojie-daily-sign -f test_notify=true
+```
+
+### 可选开关
+
+| 变量 | 位置 | 作用 |
+| --- | --- | --- |
+| `TG_CHAT_ID` | secret | 支持多个，逗号分隔：`111,222` |
+| `TG_NOTIFY_LEVEL` | **repo variable** | `all`（默认，失败也发）/ `success`（只在成功时发） |
+| `TG_API_BASE` | 环境变量 | 换反代域名，默认 `https://api.telegram.org` |
+| `TG_INSECURE_SSL` | 环境变量 | `=1` 跳过证书校验，仅供本机有 MITM 代理时调试，CI 不要开 |
+
+设 repo variable：`gh variable set TG_NOTIFY_LEVEL --repo kukuaifei/52pojie-daily-sign --body success`
+
+### 排错
+
+| 日志 | 原因 |
+| --- | --- |
+| `HTTP Error 401 ... Unauthorized` | token 错了或已被 BotFather 撤销 |
+| `HTTP Error 400 ... chat not found` | 没给 bot 发过 `/start`，或 chat_id 写错 |
+| `HTTP Error 400 ... can't parse entities` | 消息里的尖括号没转义（本次已用 HTML 模式 + `html.escape`，正常不会出现） |
+| `CERTIFICATE_VERIFY_FAILED` | 本机有 MITM 代理，加 `TG_INSECURE_SSL=1` 仅用于本地调试 |
+
+通知失败**不会**影响签到本身的退出码：日志里只有 `!` 级别的告警，`EXIT_CODE` 仍是签到结果。
+
 ## 已知限制
 
 - **验证码不是 100% 一次过**。ddddocr 在 215×80 的扭曲文字上单次约 60–80%，
