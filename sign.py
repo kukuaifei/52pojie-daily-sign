@@ -19,6 +19,7 @@
 退出码：0 已签/成功，1 未知或被 WAF 拦，2 Cookie 失效/网络异常
 """
 
+import base64
 import os
 import re
 import sys
@@ -58,6 +59,7 @@ PROBE_JS = r"""
   return {
     logout: anchors.some(a => /action=logout/.test(a.href)),
     challenge: CH.some(w => body.includes(w)),
+    verify: location.href.indexOf('waf_text_verify') >= 0 || body.includes('验证码访问'),
     none: body.includes('暂无'),
     daily: body.includes('每日签到'),
     ok: OK.filter(w => body.includes(w)),
@@ -69,6 +71,21 @@ PROBE_JS = r"""
   };
 }
 """
+
+# 创宇盾文字验证码页：把 <img> 原图绘到 canvas 拿到无损 PNG（element.screenshot 会被 CSS 缩到 80x30）
+GET_CAPTCHA_JS = r"""
+() => {
+  const i = document.querySelector('#Image1') || document.querySelector('img[src*=captcha]');
+  if (!i) return null;
+  const c = document.createElement('canvas');
+  c.width = i.naturalWidth || i.width;
+  c.height = i.naturalHeight || i.height;
+  c.getContext('2d').drawImage(i, 0, 0);
+  return {b64: c.toDataURL('image/png').split(',')[1], w: c.width, h: c.height};
+}
+"""
+
+_OCR = None
 
 
 def log(msg, level="*"):
@@ -131,22 +148,89 @@ def verdict(st):
     return None, "无明确关键词"
 
 
-def open_page(page, url, tag=""):
-    """打开页面并等待 JS 挑战自解，返回 probe 结果（没解完返回 None）"""
-    for attempt in range(3):
+def solve_captcha(page, max_rounds=10):
+    """过创宇盾「验证码访问」文字验证：ddddocr 识别 → 填 → 提交，失败自动换一张重试"""
+    global _OCR
+    if _OCR is None:
         try:
-            page.goto(url, wait_until="domcontentloaded", timeout=60000)
+            import ddddocr
+        except ImportError:
+            log("未安装 ddddocr，无法自动过文字验证码", "!")
+            return False
+        _OCR = ddddocr.DdddOcr(show_ad=False)
+        log("ddddocr 已加载")
+    for r in range(max_rounds):
+        img = page.evaluate(GET_CAPTCHA_JS)
+        if not img:
+            log("验证页上找不到验证码图片", "!")
+            return False
+        code = _OCR.classification(base64.b64decode(img["b64"]))
+        code = re.sub(r"[^0-9A-Za-z]", "", code or "")
+        log("验证码第 %d 次识别：%r（%dx%d）" % (r + 1, code, img["w"], img["h"]))
+        if not code:
+            try:
+                page.reload(wait_until="domcontentloaded", timeout=30000)
+            except Exception:
+                pass
+            time.sleep(2)
+            continue
+        try:
+            el = page.query_selector("input[name=captcha], input.code-input")
+            el.fill("")
+            el.type(code, delay=60)
+            time.sleep(0.3)
+            page.click("input.code-btn")
+        except Exception as e:
+            log("提交验证码失败：%s" % str(e)[:100], "!")
+            try:
+                page.reload(wait_until="domcontentloaded", timeout=30000)
+            except Exception:
+                pass
+            time.sleep(2)
+            continue
+        time.sleep(2.5)
+        st = probe(page)
+        if st and not st.get("verify") and not st.get("challenge"):
+            log("验证码通过 → %s" % page.url)
+            return True
+        if st and st.get("verify"):
+            log("验证码错误，换一张重试", "!")
+            time.sleep(1.0)
+    return False
+
+
+def open_page(page, url, tag="", referer=None, tries=4):
+    """打开页面，依次处理：JS 挑战（自动解）→ 文字验证码（ddddocr）→ 正常内容"""
+    import random
+    for attempt in range(tries):
+        kw = {"wait_until": "domcontentloaded", "timeout": 60000}
+        if referer:
+            kw["referer"] = referer
+        try:
+            page.goto(url, **kw)
         except Exception as e:
             log("导航失败（%s）：%s" % (tag or url, str(e)[:120]), "!")
             time.sleep(3)
             continue
-        for _ in range(20):
-            time.sleep(1.5)
+        for k in range(10):
+            time.sleep(2)
             st = probe(page)
+            if st and st.get("verify"):
+                if solve_captcha(page):
+                    st = probe(page)
+                    if st and not st.get("challenge") and not st.get("verify") and st.get("len", 0) > 300:
+                        return st
+                continue
             if st and not st.get("challenge") and st.get("len", 0) > 300:
                 return st
-        log("第 %d 次仍在挑战页（%s），重试" % (attempt + 1, tag or url), "!")
+            if k == 4:  # 等到一半还没过 → 主动重发一次请求
+                try:
+                    page.reload(wait_until="domcontentloaded", timeout=60000)
+                except Exception:
+                    pass
+        log("第 %d 次仍未通过（%s），重试" % (attempt + 1, tag or url), "!")
         shot(page, "challenge_%s_%d" % (tag or "page", attempt + 1))
+        time.sleep(3 + random.uniform(2, 6) * (attempt + 1))
     return None
 
 
@@ -173,7 +257,7 @@ def main():
         browser = p.chromium.launch(headless=True, args=[
             "--disable-blink-features=AutomationControlled",
             "--disable-dev-shm-usage", "--no-sandbox"])
-        ctx = browser.new_context(user_agent=UA, locale="zh-CN",
+        ctx = browser.new_context(locale="zh-CN",
                                   viewport={"width": 1366, "height": 900},
                                   timezone_id="Asia/Shanghai")
         # 注意：绝对不要 add_init_script 注入 webdriver 补丁——patchright 实测会因此
@@ -200,9 +284,9 @@ def run(page, dry, force_id):
         return 2, "Cookie 无效或已过期：未检测到登录态，请重新取 htVC_2132_saltkey / htVC_2132_auth"
     log("登录态 OK（%d 字符）" % st.get("len", 0))
 
-    # 2) 任务页
+    # 2) 任务页（带 Referer 从首页进，裸 goto 更容易被判定为脚本）
     time.sleep(1.0)
-    st = open_page(page, TASK_URL, "task")
+    st = open_page(page, TASK_URL, "task", referer=HOME)
     if st is None:
         return 1, "任务页被创宇盾挑战拦截，本轮放弃"
     shot(page, "task")
