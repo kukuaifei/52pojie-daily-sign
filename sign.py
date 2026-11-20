@@ -20,10 +20,13 @@
 """
 
 import base64
+import html
 import os
 import re
 import sys
 import time
+import urllib.parse
+import urllib.request
 from datetime import datetime, timedelta, timezone
 
 TZ = timezone(timedelta(hours=8))
@@ -97,6 +100,80 @@ _OCR = None
 def log(msg, level="*"):
     ts = datetime.now(TZ).strftime("%H:%M:%S")
     print("[%s] %s %s" % (ts, level, msg), flush=True)
+
+
+def run_url():
+    repo = os.environ.get("GITHUB_REPOSITORY", "").strip()
+    rid = os.environ.get("GITHUB_RUN_ID", "").strip()
+    if repo and rid:
+        return "https://github.com/%s/actions/runs/%s" % (repo, rid)
+    return ""
+
+
+def build_message(rc, msg):
+    """把结果拼成一条 Telegram 消息（HTML 模式，避免 MarkdownV2 的转义地狱）"""
+    icon, title = {0: ("✅", "签到成功"), 1: ("⚠️", "结果未知")}.get(rc, ("❌", "失败"))
+    lines = [
+        "<b>%s 52pojie %s</b>" % (icon, title),
+        "时间：%s" % datetime.now(TZ).strftime("%Y-%m-%d %H:%M:%S"),
+        "结果：%s" % html.escape(msg or ""),
+    ]
+    tid = os.environ.get("PJ52_TASK_ID", "").strip()
+    if tid:
+        lines.append("任务编号：<code>%s</code>" % html.escape(tid))
+    url = run_url()
+    if url:
+        lines.append('<a href="%s">查看运行日志</a>' % url)
+    return "\n".join(lines)
+
+
+def notify_telegram(text):
+    """推送 Telegram；任何异常都只记日志，不影响签到本身的退出码
+
+    TG_BOT_TOKEN / TG_CHAT_ID 必填，TG_CHAT_ID 支持逗号或空格分隔多个会话。
+    TG_API_BASE   可选，换反代域名（默认 https://api.telegram.org）
+    TG_INSECURE_SSL=1 可选，跳过证书校验（本机有 MITM 代理时才需要，CI 不要开）
+    """
+    token = os.environ.get("TG_BOT_TOKEN", "").strip()
+    chats = [c for c in re.split(r"[,;\s]+", os.environ.get("TG_CHAT_ID", "").strip()) if c]
+    if not token or not chats:
+        log("未配置 TG_BOT_TOKEN / TG_CHAT_ID，跳过 Telegram 通知")
+        return False
+    base = (os.environ.get("TG_API_BASE", "").strip() or "https://api.telegram.org").rstrip("/")
+    api = "%s/bot%s/sendMessage" % (base, token)
+    ctx = None
+    if os.environ.get("TG_INSECURE_SSL", "") == "1":
+        import ssl
+        ctx = ssl._create_unverified_context()
+        log("TG_INSECURE_SSL=1：已跳过 Telegram API 证书校验（仅限本机调试）", "!")
+    ok = 0
+    for cid in chats:
+        for attempt in range(3):
+            try:
+                body = urllib.parse.urlencode({
+                    "chat_id": cid,
+                    "text": text,
+                    "parse_mode": "HTML",
+                    "disable_web_page_preview": "true",
+                }).encode("utf-8")
+                req = urllib.request.Request(api, data=body, method="POST")
+                with urllib.request.urlopen(req, timeout=20, **({"context": ctx} if ctx else {})) as resp:
+                    if resp.status == 200:
+                        ok += 1
+                        break
+                    log("Telegram 返回 %s" % resp.status, "!")
+            except Exception as e:
+                detail = str(e)[:160]
+                try:  # 把 Telegram 的 description 挖出来，401/400 时最有用
+                    raw = e.read().decode("utf-8", "replace")[:200]
+                    detail = detail + " | " + raw
+                except Exception:
+                    pass
+                log("Telegram 推送失败（%s 第 %d 次）：%s" % (cid, attempt + 1, detail), "!")
+                time.sleep(2 * (attempt + 1))
+    if ok:
+        log("Telegram 通知已发送（%d 个会话）" % ok)
+    return ok > 0
 
 
 def shot(page, name):
@@ -245,6 +322,14 @@ def open_page(page, url, tag="", referer=None, tries=4):
 
 
 def main():
+    # 只测 Telegram 通道：不碰站点，发一条测试消息就退出
+    if os.environ.get("PJ52_TEST_NOTIFY", "") == "1":
+        ok = notify_telegram(
+            "<b>🧪 52pojie 签到 · 通知测试</b>\n"
+            "Telegram 通道正常，以后每次签到都会推到这里。")
+        return (0 if ok else 1), ("Telegram 测试消息已发送" if ok else
+                                  "Telegram 测试消息发送失败，检查 TG_BOT_TOKEN / TG_CHAT_ID（见 README）")
+
     raw = os.environ.get("PJ52_COOKIE", "").strip()
     dry = os.environ.get("PJ52_DRY_RUN", "") in ("1", "true", "yes")
     force_id = os.environ.get("PJ52_TASK_ID", "").strip()
@@ -371,4 +456,15 @@ if __name__ == "__main__":
         rc, msg = 2, "未捕获异常：%s" % str(e)[:200]
     log(msg, "!" if rc else "+")
     print("EXIT_CODE=%d" % rc, flush=True)
+    # 通知：默认任何结果都发（失败更需要知道）；TG_NOTIFY_LEVEL=success 时只在成功时发
+    try:
+        lvl = os.environ.get("TG_NOTIFY_LEVEL", "all").strip().lower()
+        if os.environ.get("PJ52_TEST_NOTIFY", "") == "1":
+            pass  # 测试模式已在 main() 里发过，不再重复
+        elif lvl == "success" and rc != 0:
+            log("TG_NOTIFY_LEVEL=success 且本次未成功，跳过通知")
+        else:
+            notify_telegram(build_message(rc, msg))
+    except Exception as e:
+        log("通知阶段异常（不影响结果）：%s" % str(e)[:150], "!")
     sys.exit(rc)
