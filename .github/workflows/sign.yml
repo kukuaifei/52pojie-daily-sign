@@ -10,6 +10,10 @@ on:
         description: "只探测不提交（不会真的签到）"
         type: boolean
         default: false
+      test_notify:
+        description: "只测 Telegram 通知通道（不访问站点）"
+        type: boolean
+        default: false
 
 permissions:
   contents: read
@@ -42,6 +46,10 @@ jobs:
           PJ52_COOKIE: ${{ secrets.PJ52_COOKIE }}
           PJ52_DEBUG: "1"
           PJ52_DRY_RUN: ${{ inputs.dry_run && '1' || '' }}
+          PJ52_TEST_NOTIFY: ${{ inputs.test_notify && '1' || '' }}
+          TG_BOT_TOKEN: ${{ secrets.TG_BOT_TOKEN }}
+          TG_CHAT_ID: ${{ secrets.TG_CHAT_ID }}
+          TG_NOTIFY_LEVEL: ${{ vars.TG_NOTIFY_LEVEL || 'all' }}
         run: python sign.py
 
       - name: 上传调试产物（截图 + HTML）
