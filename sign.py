@@ -94,6 +94,34 @@ GET_CAPTCHA_JS = r"""
 }
 """
 
+# Discuz 登录页图形验证码（只有连续登录失败后才会出现）
+GET_SECCODE_JS = r"""
+() => {
+  const cands = [...document.querySelectorAll('img')].filter(i =>
+    /seccode/i.test(i.src || '') || /^seccode/i.test(i.id || ''));
+  const vis = cands.filter(i => i.offsetWidth > 0 && i.offsetHeight > 0);
+  if (!vis.length) return null;
+  const i = vis[0];
+  const c = document.createElement('canvas');
+  c.width = i.naturalWidth || i.width;
+  c.height = i.naturalHeight || i.height;
+  c.getContext('2d').drawImage(i, 0, 0);
+  return {b64: c.toDataURL('image/png').split(',')[1], w: c.width, h: c.height, id: i.id || ''};
+}
+"""
+
+# Cloudflare Turnstile 是否已经拿到 token（空串 = 还没过）
+TURNSTILE_JS = r"""
+() => {
+  const e = document.querySelector('input[name="cf-turnstile-response"]');
+  if (!e) return -1;
+  return (e.value || '').length;
+}
+"""
+
+LOGIN_URL = "https://www.52pojie.cn/member.php?mod=logging&action=login"
+COOKIE_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "new_cookie.txt")
+
 _OCR = None
 
 
@@ -321,6 +349,114 @@ def open_page(page, url, tag="", referer=None, tries=4):
     return None
 
 
+def export_cookie(ctx):
+    """从浏览器 context 里导出 Discuz 认证所需的 htVC_2132_* """
+    want = ("htVC_2132_saltkey", "htVC_2132_auth", "htVC_2132_sid")
+    got = {}
+    try:
+        for c in ctx.cookies():
+            if c.get("name") in want and c.get("value"):
+                got[c["name"]] = c["value"]
+    except Exception:
+        return ""
+    if "htVC_2132_auth" not in got or "htVC_2132_saltkey" not in got:
+        return ""
+    return "; ".join("%s=%s" % (k, got[k]) for k in want if k in got)
+
+
+def save_cookie(cookie):
+    """写盘给 workflow 回写 secret 用；同时输出到日志便于人工兜底"""
+    if not cookie:
+        return
+    with open(COOKIE_FILE, "w", encoding="utf-8") as f:
+        f.write(cookie)
+    log("新 Cookie 已写入 new_cookie.txt（长度 %d）" % len(cookie))
+
+
+def relogin(page):
+    """Cookie 失效时用账号密码重新登录：填表 → 等 Turnstile → 提交 → 验证登录态"""
+    user = os.environ.get("PJ52_USER", "").strip()
+    pwd = os.environ.get("PJ52_PASS", "").strip()
+    if not user or not pwd:
+        log("未配置 PJ52_USER / PJ52_PASS，无法自动重新登录", "!")
+        return False
+    log("Cookie 失效，尝试用账号 %s 自动登录" % user[:3] + "***")
+    st = open_page(page, LOGIN_URL, "login")
+    if st is None:
+        log("打不开登录页（WAF）", "!")
+        return False
+    try:
+        page.fill("input[name=username]", user)
+        page.fill("input[name=password]", pwd)
+    except Exception as e:
+        log("填写账号密码失败：%s" % str(e)[:100], "!")
+        return False
+
+    # 安全提问留空（questionid=0）；若账号设了安全提问，登录会失败——这是已知边界
+    try:
+        page.select_option("select[name=questionid]", "0")
+    except Exception:
+        pass
+
+    # Cloudflare Turnstile：invisible/managed 模式往往几秒内自动给 token
+    waited = 0
+    while waited < 30:
+        try:
+            n = page.evaluate(TURNSTILE_JS)
+        except Exception:
+            n = -1
+        if n > 0:
+            log("Turnstile 已通过（%d 字符）" % n)
+            break
+        time.sleep(2)
+        waited += 2
+    else:
+        log("Turnstile 30 秒内没拿到 token，仍然尝试提交", "!")
+
+    # Discuz 连续失败后才会挂图形验证码，出现就用 ddddocr 过
+    try:
+        sec = page.evaluate(GET_SECCODE_JS)
+    except Exception:
+        sec = None
+    if sec:
+        global _OCR
+        if _OCR is None:
+            try:
+                import ddddocr
+                _OCR = ddddocr.DdddOcr(show_ad=False)
+            except ImportError:
+                _OCR = False
+        if _OCR:
+            code = re.sub(r"[^0-9A-Za-z]", "", _OCR.classification(base64.b64decode(sec["b64"])) or "")
+            log("登录验证码识别：%r（%dx%d）" % (code, sec["w"], sec["h"]))
+            if code:
+                try:
+                    page.fill("input[name=seccodeverify]", code)
+                except Exception:
+                    pass
+
+    try:
+        page.click("button[name=loginsubmit]")
+    except Exception:
+        try:
+            page.click("input[name=loginsubmit]")
+        except Exception as e:
+            log("点击登录按钮失败：%s" % str(e)[:100], "!")
+            return False
+
+    for k in range(8):
+        time.sleep(2)
+        st = probe(page)
+        if st and st.get("logout"):
+            log("自动登录成功 → %s" % page.url)
+            return True
+        if st and st.get("verify"):
+            solve_captcha(page)
+    log("自动登录失败（可能需要安全提问 / 验证码 / Turnstile 未过）", "!")
+    shot(page, "login_fail")
+    return False
+
+
 def main():
     # 只测 Telegram 通道：不碰站点，发一条测试消息就退出
     if os.environ.get("PJ52_TEST_NOTIFY", "") == "1":
@@ -361,7 +497,7 @@ def main():
         page = ctx.new_page()
         page.set_default_timeout(45000)
         try:
-            return run(page, dry, force_id)
+            return run(page, dry, force_id, ctx)
         finally:
             try:
                 ctx.close()
@@ -370,13 +506,23 @@ def main():
                 pass
 
 
-def run(page, dry, force_id):
+def run(page, dry, force_id, ctx=None):
     # 1) 首页预热（过挑战、拿挑战下发的 cookie）
     st = open_page(page, HOME, "home")
     if st is None:
         return 1, "首页未通过创宇盾挑战（数据中心 IP 常被要求验证码，见 README「Actions 出网 IP」）"
     if not st.get("logout"):
-        return 2, "Cookie 无效或已过期：未检测到登录态，请重新取 htVC_2132_saltkey / htVC_2132_auth"
+        # Cookie 失效 → 有账号密码就自动重登，成功后把新 Cookie 交给 workflow 回写 secret
+        if relogin(page):
+            st = probe(page) or {}
+            new_ck = export_cookie(ctx) if ctx is not None else ""
+            if new_ck:
+                save_cookie(new_ck)
+                if not os.environ.get("GH_PAT", "").strip():
+                    log("未配置 GH_PAT，new_cookie.txt 不会自动回写到 secret（见 README）", "!")
+        if not st.get("logout"):
+            return 2, ("Cookie 无效或已过期，自动登录也没成功。请重新取 htVC_2132_saltkey / "
+                       "htVC_2132_auth，并检查 PJ52_USER / PJ52_PASS 是否正确")
     log("登录态 OK（%d 字符）" % st.get("len", 0))
 
     # 2) 任务页（带 Referer 从首页进，裸 goto 更容易被判定为脚本）

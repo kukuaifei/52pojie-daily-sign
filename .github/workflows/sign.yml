@@ -2,8 +2,8 @@ name: 52pojie daily sign
 
 on:
   schedule:
-    # UTC 00:20 = 北京时间 08:20；GitHub 定时任务会延迟几分钟到半小时，属正常
-    - cron: "20 0 * * *"
+    # UTC 01:20 = 北京时间 09:20；避开整点风控更严的时段，GitHub 定时通常会延迟几分钟到半小时
+    - cron: "20 1 * * *"
   workflow_dispatch:
     inputs:
       dry_run:
@@ -44,6 +44,8 @@ jobs:
       - name: 执行签到
         env:
           PJ52_COOKIE: ${{ secrets.PJ52_COOKIE }}
+          PJ52_USER: ${{ secrets.PJ52_USER }}
+          PJ52_PASS: ${{ secrets.PJ52_PASS }}
           PJ52_DEBUG: "1"
           PJ52_DRY_RUN: ${{ inputs.dry_run && '1' || '' }}
           PJ52_TEST_NOTIFY: ${{ inputs.test_notify && '1' || '' }}
@@ -51,6 +53,22 @@ jobs:
           TG_CHAT_ID: ${{ secrets.TG_CHAT_ID }}
           TG_NOTIFY_LEVEL: ${{ vars.TG_NOTIFY_LEVEL || 'all' }}
         run: python sign.py
+
+      - name: 回写新 Cookie 到 secret（自动登录后自动续期）
+        if: always()
+        env:
+          GH_TOKEN: ${{ secrets.GH_PAT }}
+        run: |
+          if [ -z "$GH_TOKEN" ]; then
+            echo "未配置 GH_PAT，跳过自动续期（Cookie 失效时需手动更新）"
+            exit 0
+          fi
+          if [ ! -s new_cookie.txt ]; then
+            echo "本次没有产生新 Cookie，跳过"
+            exit 0
+          fi
+          gh secret set PJ52_COOKIE --repo "$GITHUB_REPOSITORY" --body "$(cat new_cookie.txt)"
+          echo "已把新 Cookie 写回 PJ52_COOKIE，下次运行直接复用"
 
       - name: 上传调试产物（截图 + HTML）
         if: always()

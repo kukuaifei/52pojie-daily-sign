@@ -73,6 +73,58 @@ gh run watch --repo kukuaifei/52pojie-daily-sign
 gh run download <run-id> --repo kukuaifei/52pojie-daily-sign -n debug -D _art/debug
 ```
 
+## Cookie 自动续期（可选，靠账号密码）
+
+默认只用 `PJ52_COOKIE`。想让它**过期后自己重新登录**，再配三个 secret：
+
+```bash
+# 账号密码（52pojie 的登录名 + 密码）
+gh secret set PJ52_USER --repo kukuaifei/52pojie-daily-sign --body "你的用户名"
+gh secret set PJ52_PASS --repo kukuaifei/52pojie-daily-sign --body "你的密码"
+
+# 有 secrets 写权限的 PAT，用来把新 Cookie 回写到 secret
+gh secret set GH_PAT --repo kukuaifei/52pojie-daily-sign --body "github_pat_xxx"
+```
+
+工作流就变成：
+
+```
+Cookie 有效  → 直接签到
+Cookie 失效  → 用 PJ52_USER/PJ52_PASS 重新登录
+             → 拿到新 htVC_2132_auth
+             → 写 new_cookie.txt
+             → workflow 步骤 gh secret set PJ52_COOKIE 回写
+             → 下次运行直接用新的
+```
+
+**先在本机验证这条路能不能走通**（家宽 IP 的 Turnstile 比 Azure 容易过得多）：
+
+```powershell
+$env:PJ52_USER = "你的用户名"
+$env:PJ52_PASS = "你的密码"
+python test_login.py
+```
+
+会打开一个**有头浏览器**，你能看到它填表单、过 Turnstile、点登录。成功会打印：
+
+```
+=== COOKIE ===
+htVC_2132_auth=xxxx; htVC_2132_saltkey=yyyy; htVC_2132_sid=zzzz
+=== END ===
+```
+
+### 这条路的三个已知边界
+
+| 边界 | 说明 |
+| --- | --- |
+| **Cloudflare Turnstile** | 登录表单里有 `cf-turnstile-response`，脚本最多等 30 秒自动放行。Azure 数据中心 IP 常被要求交互，家宽一般直接过 |
+| **安全提问** | 账号一旦设了「安全提问」，脚本填空答案会登录失败（日志会说「自动登录失败」）。去 52pojie 账号设置里取消，或继续用手动 Cookie |
+| **图形验证码** | 连续登录失败几次后 Discuz 会挂验证码，脚本用 ddddocr 兜底识别（第一次通常不需要） |
+
+三条都过不去时不影响主流程：签到照常跑，Cookie 失效就返回退出码 2 并发一条 ❌ Telegram，你按提示手动更新一次即可。
+
+PAT 权限：Fine-grained token → 目标仓库 `52pojie-daily-sign` → **Secrets: Read and write**。
+
 ## Cookie 怎么取（掉了再取一次）
 
 只要两个字段就够，`htVC_2132_saltkey` + `htVC_2132_auth`（顺带 `htVC_2132_sid=0`）：

@@ -3,3 +3,6 @@ __pycache__/
 *.pyc
 *.log
 .env
+new_cookie.txt
+_*.py
+_art/
