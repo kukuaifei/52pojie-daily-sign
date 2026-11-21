@@ -6,7 +6,7 @@ on:
     # UTC 01:40 = 北京 09:40（主时间）。GitHub 对私有仓库的 schedule 目前不稳定
     # （2026-11 实测：state=active、手动可跑，但 schedule 事件永不入队），
     # 所以这一个点只是「万一恢复了」的通道，真正的兜底是本机 schtasks 调 workflow_dispatch。
-    - cron: "40 1 * * *"
+    - cron: "*/10 * * * *"
   workflow_dispatch:
     inputs:
       dry_run:
