@@ -2,6 +2,7 @@ debug/
 __pycache__/
 *.pyc
 *.log
+logs/
 .env
 new_cookie.txt
 _*.py
