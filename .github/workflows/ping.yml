@@ -1,0 +1,21 @@
+name: cron ping
+
+# 诊断用：如果这个 workflow 的 schedule 也不触发，说明是账号/仓库级别的 schedule 失效，
+# 不是 sign.yml 的配置问题。验证完可以删掉这个文件。
+on:
+  schedule:
+    - cron: "*/5 * * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  ping:
+    runs-on: ubuntu-latest
+    timeout-minutes: 3
+    steps:
+      - name: report
+        run: |
+          echo "cron ping fired at $(date -u +%Y-%m-%dT%H:%M:%SZ)"
+          echo "event=$GITHUB_EVENT_NAME"
