@@ -33,9 +33,34 @@
 
 ```
 .github/workflows/sign.yml
-  ├─ schedule: 20 0 * * *   (UTC 00:20 = 北京时间 08:20，GitHub 通常延迟 5–30 分钟)
+  ├─ schedule: 40 1 * * *   (UTC 01:40 = 北京时间 09:40；见下方「私有仓库 schedule 不可用」)
   └─ workflow_dispatch        (手动触发，可勾 dry_run 只探测不提交)
 ```
+
+> **私有仓库的 schedule 目前不可用（2026-11 实测）**
+>
+> 本仓库 `state=active`、`workflow_dispatch` 秒级可跑，但 **`event=schedule` 的 run 一条都没有**。
+> 实证：把 cron 临时改成 `*/15 * * * *`，等过 08:15 UTC 窗口 + 12 分钟，`schedule` 计数仍是 0。
+> 社区里 2026 年下半年多个同现象报告（都是私有仓库 + 个人 Free 账号）：
+> [#201354](https://github.com/orgs/community/discussions/201354)、
+> [#209391](https://github.com/orgs/community/discussions/209391)、
+> [#209569](https://github.com/orgs/community/discussions/209569)、
+> [#209896](https://github.com/orgs/community/discussions/209896)、
+> [#201008](https://github.com/orgs/community/discussions/201008)。
+>
+> 所以**真正的定时靠本机 `run_now.ps1`**（Windows 计划任务每小时查一次，今天没成功就 dispatch）：
+>
+> ```powershell
+> schtasks /Create /TN "52pojie-sign-trigger" ^
+>   /TR "powershell -NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -File \"D:\deepseek-harness\软件破解\52pojie-actions\run_now.ps1\"" ^
+>   /SC HOURLY /MO 1 /ST 09:40 /DU 06:00 /F
+> ```
+>
+> `run_now.ps1` 是幂等的：先看今天有没有 `conclusion=success` 的 run，有就直接退出；
+> 有 20 分钟内刚启动的 run 也不重复触发。日志在 `logs/trigger_YYYYMMDD.log`。
+>
+> 想让 GitHub 自己的 cron 恢复：把仓库转 public（`gh repo edit --visibility public`）——代码里没有
+> 任何密钥，Cookie / 账号 / PAT 全在 Actions secrets 里。
 
 判定逻辑：
 
@@ -48,6 +73,12 @@
 | 命中「本期您已申请过此任务」 | 今天已申请/已领，视为成功 | 0 |
 | 挑战页/验证码始终没过 | 未知 | 1 |
 | Cookie 失效（无 logout 链接） | 需要重新取 Cookie | 2 |
+
+> **2026-11-21 踩过的坑（已修）**：`ok` / `already` / `fail` 关键词原来在**整页**文本里匹配，
+> 而页脚免责声明里有「不得将上述内容用于商业或者**非法**用途」——于是每个成功页都命中失败词，
+> 签到明明 `+2CB` 到账了，脚本却报「命中失败词：非法」、workflow 显示失败。
+> 现在三个词表只在 `#ct` 主内容区匹配（`scope = mainTxt || body`），并且 `apply` 已明确成功后，
+> 补领 `draw` 返回什么都不会覆盖这个成功结论。
 
 > **关于「今天签了」的判定**：done 页只要历史上完成过就永远挂着「每日签到红包任务」字样，
 > 光看任务名会把「没签」误判成「已签」。页脚又有 `GMT+8, 2026-11-20 16:08` 这种时间戳，
