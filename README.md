@@ -33,34 +33,41 @@
 
 ```
 .github/workflows/sign.yml
-  ├─ schedule: 40 1 * * *   (UTC 01:40 = 北京时间 09:40；见下方「私有仓库 schedule 不可用」)
+  ├─ schedule: 40 1 * * *   (UTC 01:40 = 北京时间 09:40；见下方「schedule 在本账号失效」)
   └─ workflow_dispatch        (手动触发，可勾 dry_run 只探测不提交)
 ```
 
-> **私有仓库的 schedule 目前不可用（2026-11 实测）**
+> **`schedule` 在本账号整体失效（2026-11-21 四轮实证）**
 >
-> 本仓库 `state=active`、`workflow_dispatch` 秒级可跑，但 **`event=schedule` 的 run 一条都没有**。
-> 实证：把 cron 临时改成 `*/15 * * * *`，等过 08:15 UTC 窗口 + 12 分钟，`schedule` 计数仍是 0。
-> 社区里 2026 年下半年多个同现象报告（都是私有仓库 + 个人 Free 账号）：
+> | 测试 | 配置 | schedule run |
+> | --- | --- | --- |
+> | 私有仓库 | `*/15`，跨 08:15 UTC 窗口 +12min | **0** |
+> | 转 public 后 | `*/10`，跨 08:40 / 08:50 窗口 | **0** |
+> | 全新最小 workflow（public、无 secret、无 concurrency） | `*/5`，跨 08:55 / 09:00 / 09:05 | **0** |
+>
+> 期间 GitHub 状态页 All Systems Operational，`state=active`、`workflow_dispatch` 秒级可跑。
+> 结论：**与可见性、YAML 写法都无关，是这个账号的 cron 调度不工作**。社区报告：
 > [#201354](https://github.com/orgs/community/discussions/201354)、
 > [#209391](https://github.com/orgs/community/discussions/209391)、
 > [#209569](https://github.com/orgs/community/discussions/209569)、
 > [#209896](https://github.com/orgs/community/discussions/209896)、
 > [#201008](https://github.com/orgs/community/discussions/201008)。
 >
-> 所以**真正的定时靠本机 `run_now.ps1`**（Windows 计划任务每小时查一次，今天没成功就 dispatch）：
+> **签到本身在 GitHub Actions 上跑得好好的，缺的只是一个"准点按按钮"的东西。**
+> 四个替代方案（都只发一个 `POST .../dispatches`，签到仍在 Actions 执行）见
+> [`EXTERNAL_CRON.md`](EXTERNAL_CRON.md)：
 >
-> ```powershell
-> schtasks /Create /TN "52pojie-sign-trigger" ^
->   /TR "powershell -NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -File \"D:\deepseek-harness\软件破解\52pojie-actions\run_now.ps1\"" ^
->   /SC HOURLY /MO 1 /ST 09:40 /DU 06:00 /F
-> ```
+> | 方案 | 依赖 | 机器要开机吗 |
+> | --- | --- | --- |
+> | A. cron-job.org | 注册一个免费账号，网页配 5 分钟 | 不要 |
+> | B. Cloudflare Worker | CF 免费账号 + 两条 wrangler 命令 | 不要 |
+> | C. Google Apps Script | 有 Google 账号即可 | 不要 |
+> | D. 本机 `run_now.ps1` + 计划任务 | 已经配好了 | **要** |
 >
 > `run_now.ps1` 是幂等的：先看今天有没有 `conclusion=success` 的 run，有就直接退出；
 > 有 20 分钟内刚启动的 run 也不重复触发。日志在 `logs/trigger_YYYYMMDD.log`。
 >
-> 想让 GitHub 自己的 cron 恢复：把仓库转 public（`gh repo edit --visibility public`）——代码里没有
-> 任何密钥，Cookie / 账号 / PAT 全在 Actions secrets 里。
+> 多个方案并存没问题——`sign.py` 本身幂等，同一天被触发几次都只是「今日已完成」后退出。
 
 判定逻辑：
 
