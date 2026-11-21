@@ -45,13 +45,16 @@ PROBE_JS = r"""
   const SIGN = /签到|打卡|每日|每天/;
   const OK = ['签到成功', '已签到', '已经签到', '任务完成', '恭喜', '获得', '领取成功', '奖励', '已完成', '申请成功', '您已经签到'];
   const ALREADY = ['本期您已申请过此任务', '已申请过此任务', '下期再来', '您已完成此任务', '已领取', '已经领取'];
-  const FAIL = ['失败', '错误', '没有找到', '不存在', '无权', '禁止', '请先登录', '您需要先登录', '非法'];
+  const FAIL = ['失败', '错误', '没有找到', '不存在', '无权', '禁止', '请先登录', '您需要先登录', '非法操作'];
 
   const body = document.body ? document.body.innerText : '';
   // 页脚有 "GMT+8, 2026-11-20 16:08" 这类时间戳，会在任何页面命中当天日期，
   // 所以"今天签过"必须在主内容区（#ct）里找，不能扫整页
   const main = document.querySelector('#ct') || document.querySelector('#wp') || null;
   const mainTxt = main ? (main.innerText || '') : '';
+  // ok / already / fail 也只在主内容区匹配：#ft 页脚免责声明里有"非法用途"，
+  // 拿整页匹配会让每个成功页都命中失败词（2026-11-21 真实踩过）
+  const scope = mainTxt || body;
   const anchors = [...document.querySelectorAll('a[href]')];
   const rows = anchors.filter(a => /do=(apply|draw)/.test(a.href)).map(a => {
     const box = a.closest('tr') || a.parentElement || a;
@@ -71,9 +74,9 @@ PROBE_JS = r"""
     daily: body.includes('每日签到'),
     // done 页只要历史完成过就永远含"每日签到"文字，必须配合当日日期（且只在主内容区）才能证明"今天签了"
     today: !!(today && mainTxt && mainTxt.includes(today)),
-    ok: OK.filter(w => body.includes(w)),
-    already: ALREADY.filter(w => body.includes(w)),
-    fail: FAIL.filter(w => body.includes(w)),
+    ok: OK.filter(w => scope.includes(w)),
+    already: ALREADY.filter(w => scope.includes(w)),
+    fail: FAIL.filter(w => scope.includes(w)),
     rows: rows,
     len: body.length,
     plain: body.replace(/[^\x20-\x7e]/g, ' ').replace(/\s+/g, ' ').slice(0, 260)
@@ -587,6 +590,10 @@ def run(page, dry, force_id, ctx=None):
                 durl = "%s&do=draw&id=%s" % (TASK_URL, m.group(1))
                 st2 = open_page(page, durl, "draw2")
                 v2, why2 = verdict(st2 or {})
+                # apply 已经明确成功（页面已经出现 +CB / 恭喜），补领这一步只是拿奖励，
+                # 它返回"已领取/非法操作"不代表签到失败，不能覆盖已经成功的结果
+                if v is True:
+                    return 0, "任务 #%s 申请成功（%s）；补领：%s" % (m.group(1), why, why2)
                 return (0 if v2 else 1), "任务 #%s 申请+领奖：%s（%s）" % (
                     m.group(1), "成功" if v2 else "未知", why2)
 
