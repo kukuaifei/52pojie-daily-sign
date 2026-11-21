@@ -3,7 +3,7 @@ name: 52pojie daily sign
 on:
   schedule:
     # UTC 01:20 = 北京时间 09:20；避开整点风控更严的时段，GitHub 定时通常会延迟几分钟到半小时
-    - cron: "20 1 * * *"
+    - cron: "*/15 * * * *"
   workflow_dispatch:
     inputs:
       dry_run:
