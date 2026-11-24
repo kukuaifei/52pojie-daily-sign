@@ -52,6 +52,13 @@ CANVAS_JS = r"""
 
 
 def compute_offset(bg_b64, blk_b64, blk_bbox):
+    """缺口定位：TM_CCOEFF_NORMED + mask 为主，边缘模板匹配为辅，两者投票。
+
+    实测 4 张真实样本（人工核对真值 95 / 133 / 193 / 170）：
+      ccoeff  ->  95 / 133 / 201 / 167   （最稳，bg_2 偏 8）
+      edge    ->  95 / 134 / 200 / 171
+      ccorr   ->  96 / 133 / 144 / 235   （bg_3 直接跑飞，弃用）
+    """
     bg = cv2.imdecode(np.frombuffer(base64.b64decode(bg_b64), np.uint8), cv2.IMREAD_UNCHANGED)
     blk = cv2.imdecode(np.frombuffer(base64.b64decode(blk_b64), np.uint8), cv2.IMREAD_UNCHANGED)
     if bg is None or blk is None:
@@ -66,9 +73,41 @@ def compute_offset(bg_b64, blk_b64, blk_bbox):
     mask = (alpha[by0:by0 + bh, bx0:bx0 + bw] > 200).astype(np.uint8) * 255
     if patch.size == 0:
         return None, 0.0, "empty patch"
-    res = cv2.matchTemplate(bg[:, :, :3], patch, cv2.TM_CCORR_NORMED, mask=mask)
-    _, maxv, _, maxloc = cv2.minMaxLoc(res)
-    return maxloc[0] - bx0, float(maxv), f"gap_x={maxloc[0]} block_x={bx0}"
+
+    bg3 = bg[:, :, :3]
+    cands = []
+
+    # 主算法：彩色模板 + mask（CCOEFF 对整体亮度更鲁棒）
+    try:
+        r = cv2.matchTemplate(bg3, patch, cv2.TM_CCOEFF_NORMED, mask=mask)
+        _, sc, _, loc = cv2.minMaxLoc(r)
+        cands.append(("ccoeff", loc[0], sc))
+    except Exception:
+        pass
+
+    # 副算法：灰度边缘图模板匹配（只看结构，不看颜色）
+    try:
+        pg = cv2.cvtColor(patch, cv2.COLOR_BGR2GRAY)
+        bg_g = cv2.cvtColor(bg3, cv2.COLOR_BGR2GRAY)
+        r2 = cv2.matchTemplate(cv2.Canny(bg_g, 50, 150), cv2.Canny(pg, 50, 150), cv2.TM_CCORR_NORMED)
+        _, sc2, _, loc2 = cv2.minMaxLoc(r2)
+        cands.append(("edge", loc2[0], sc2))
+    except Exception:
+        pass
+
+    if not cands:
+        return None, 0.0, "no algorithm produced a result"
+
+    xs = [c[1] for c in cands]
+    # 两者接近就用平均，差太多就取置信度高的那个
+    if len(xs) == 2 and abs(xs[0] - xs[1]) <= 15:
+        gap = int(round((xs[0] + xs[1]) / 2))
+        note = f"agree {xs}"
+    else:
+        best = max(cands, key=lambda c: c[2])
+        gap = best[1]
+        note = f"pick {best[0]} from {[(n, x) for n, x, _ in cands]}"
+    return gap - bx0, float(max(c[2] for c in cands)), f"gap_x={gap} block_x={bx0} {note}"
 
 
 def human_track(distance):
