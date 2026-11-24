@@ -1,3 +1,5 @@
 playwright>=1.49
 patchright>=1.4
 ddddocr>=1.5
+opencv-python-headless>=4.8
+numpy>=1.24
