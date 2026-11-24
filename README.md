@@ -1,10 +1,14 @@
 # 52pojie 每日签到 · GitHub Actions
 
-吾爱破解（www.52pojie.cn）每日「签到红包任务」的全自动签到，跑在 GitHub Actions 上，零本地依赖。
+吾爱破解（www.52pojie.cn）每日「签到红包任务」的全自动签到。**双跑道**：
 
-**已部署**：<https://github.com/kukuaifei/52pojie-daily-sign>（private）
-**最近一次验证**：run [44699655475](https://github.com/kukuaifei/52pojie-daily-sign/actions/runs/44699655475) ✓ 1m33s ——
-验证码第 1 次识别 `6rdp` 错误 → 第 2 次 `yezH` 通过 → 判定「今日已完成」。
+- **`sign-local`** —— 跑在本机 **self-hosted Windows runner** 上，出网是家宽 IP。52pojie 的创宇盾对家宽 IP 基本不拦，成功率最高。**这是主跑道。**
+- **`sign-cloud`** —— GitHub 托管 ubuntu runner（Azure 段），仅在本机跑道失败时兜底。该段 IP 会被升级成「滑动拼图」，能不能过看运气。
+
+**已部署**：<https://github.com/kukuaifei/52pojie-daily-sign>（public）
+**最近一次验证**：run [45349262352](https://github.com/kukuaifei/52pojie-daily-sign/actions/runs/45349262352) ✓ ——
+`sign-local=success | sign-cloud=skipped`，家宽 IP + 验证码 `9PZs` 一次过，apply 成功，+2CB 到账。
+Telegram 通知也已打通（run [45350550471](https://github.com/kukuaifei/52pojie-daily-sign/actions/runs/45350550471)）。
 
 ## 三层防线：为什么不写 requests 脚本
 
@@ -15,6 +19,10 @@
 | ① JS 挑战 | 纯 HTTP（requests / curl_cffi / 甚至 playwright 的 `ctx.request`）拿到的是 32528 字节 `Please enable JavaScript`，页面上没有一个 `do=apply` | **patchright + 真 Chromium 渲染**，让挑战在浏览器里自己解开 |
 | ② 文字验证码 | 数据中心 IP（如 Actions 的 Azure 段）直接给 `waf_text_verify.html`：「请完成安全验证! IP:xxx」+ 215×80 图形验证码 | **ddddocr 识别 → 填入 → 提交**，错了自动换图重试（实测 1–2 次内通过，上限 10 次） |
 | ③ GBK 乱码 | 本站 `charset=gbk`，Playwright 回传的中文在 Python 侧全是「锟斤拷」 | 所有中文判断放进**页面内 JS**，Python 只收布尔值/数字/URL |
+| ④ 滑动拼图 | **2026-11-24 起**，数据中心 IP（如 Actions 的 Azure 段 `20.120.164.105`）从文字验证码**升级为滑块**：「向右滑动填充拼图」，ddddocr 完全无效 | 不硬刚：改用**家宽 IP 的 self-hosted runner**（实测本机直连首页 76KB 正常内容，连验证码都不给） |
+
+> ④ 是这套东西现在必须自建 runner 的唯一原因。本地 IP 实测：`HTTP 200 / 76821 字节`，正文无 `waf_` / `安全验证` / `wzws` 任何痕迹。
+> Azure 段则稳定吃滑块——那不是代码能解决的问题，是 IP 信誉问题。
 
 实测踩到的三个坑（代码里都留了注释）：
 
@@ -28,6 +36,61 @@
 3. **验证码图片必须用 canvas 取原图**
    `<img>` 被 CSS 缩成 80×30，`element.screenshot()` 出来的图 ddddocr 几乎认不出；
    `GET_CAPTCHA_JS` 按 `naturalWidth/naturalHeight` 重绘到 canvas，得到无损 215×80 PNG。
+
+## 本机 runner 部署（`sign-local` 跑道）
+
+Windows 10/11 x64，已装 Python 3.11（`D:\Python311`）与 GitHub CLI。
+
+**1. 注册 runner**
+
+```powershell
+$zip = "$env:TEMP\actions-runner.zip"
+Invoke-WebRequest 'https://github.com/actions/runner/releases/download/v2.338.2/actions-runner-win-x64-2.338.2.zip' -OutFile $zip
+Expand-Archive $zip D:\actions-runner -Force
+cd D:\actions-runner
+# RUNNER_TOKEN 从 repo Settings → Actions → Runners → New self-hosted runner 拿
+.\config.cmd --url https://github.com/kukuaifei/52pojie-daily-sign --token <RUNNER_TOKEN> `
+             --name win-local --labels local --runasservice `
+             --windowslogonaccount "NT AUTHORITY\NETWORK SERVICE" --unattended
+```
+
+2.338.2 **没有 `svc.cmd`**，装服务只能用 `--runasservice`；要换账户先 `.\config.cmd remove --token <REMOVE_TOKEN>`。
+服务名形如 `actions.runner.kukuaifei-52pojie-daily-sign.win-local`，`Get-Service` 里应为 Running / Automatic。
+
+**2. 给服务账户开权限**（它不是你，读不到你的 `%LOCALAPPDATA%`）
+
+```powershell
+robocopy "$env:LOCALAPPDATA\ms-playwright" D:\ms-playwright /E
+icacls D:\ms-playwright /grant "NETWORK SERVICE:(OI)(CI)RX" /T
+icacls D:\Python311      /grant "NETWORK SERVICE:(OI)(CI)RX" /T
+```
+
+**3. 执行策略**
+
+```powershell
+Set-ExecutionPolicy -Scope LocalMachine RemoteSigned -Force
+```
+
+workflow 的 `defaults.run.shell` 已写成 `powershell -ExecutionPolicy Bypass -File {0}`。
+机器上**没有 pwsh**，`shell: pwsh` 会直接 `command not found`。
+
+**4. Telegram 走代理**
+
+`NETWORK SERVICE` 读不到你的用户级代理设置，直连 `api.telegram.org` 会被重置（`WinError 10054`）。workflow 里显式指定：
+
+```yaml
+HTTP_PROXY: http://127.0.0.1:7897
+HTTPS_PROXY: http://127.0.0.1:7897
+NO_PROXY: www.52pojie.cn,static.52pojie.cn,localhost,127.0.0.1
+TG_INSECURE_SSL: "1"
+```
+
+`TG_INSECURE_SSL=1` 是因为本机代理做了 TLS 中间人（自签证书链）。它只影响通知请求；签到流量走 Chromium，不读这两个变量。
+
+### 这台机器关机 / 睡眠会怎样
+
+`sign-local` 会一直 pending，托管跑道不会自动接管（`needs: sign-local` 没跑完）。想强制走云跑道：手动触发时勾 `use_cloud`。
+本机 `run_now.ps1` 是幂等的（今天已有 success 就退出、20 分钟内有 run 也不重复触发），多个触发源并存不会重复签到。
 
 ## 工作流
 
