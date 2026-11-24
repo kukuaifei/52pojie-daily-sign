@@ -1,13 +1,13 @@
 name: 52pojie daily sign
 
 # 双跑道设计：
-#   sign-local  —— 跑在自建 Windows runner 上，走家庭宽带 IP。52pojie 的创宇盾对数据中心 IP
+#   sign-local  —— 跑在自建 Windows runner（本机服务，家宽 IP）。52pojie 的创宇盾对数据中心 IP
 #                  （GitHub 托管 runner 是 Azure）会直接给「滑动拼图」，家宽 IP 通常连验证码都不给。
 #                  这是主跑道。
 #   sign-cloud  —— GitHub 托管 ubuntu runner，仅在本机跑道失败（或手动勾 use_cloud）时兜底。
 #
-# GitHub 自己的 schedule 对这个账号时灵时不灵（2026-11-22 起偶尔入队，但延迟 7~8 小时），
-# 准点触发靠本机 schtasks（run_now.ps1）+ 常驻 runner。
+# 注意：本机 runner 以 NT AUTHORITY\NETWORK SERVICE 运行，机器上没有 pwsh（PowerShell 7），
+# 所以所有 shell 用 powershell（5.1）。
 
 on:
   schedule:
@@ -40,6 +40,9 @@ jobs:
     if: ${{ !inputs.use_cloud }}
     runs-on: [self-hosted, windows, local]
     timeout-minutes: 20
+    defaults:
+      run:
+        shell: powershell
     env:
       PLAYWRIGHT_BROWSERS_PATH: D:\ms-playwright
       PYTHONIOENCODING: utf-8
@@ -57,21 +60,31 @@ jobs:
       - uses: actions/checkout@v4
 
       - name: 环境自检
-        shell: pwsh
         run: |
-          python --version
+          [Console]::OutputEncoding = [Text.Encoding]::UTF8
+          $py = 'D:\Python311\python.exe'
+          if (-not (Test-Path $py)) { $py = 'python' }
+          Write-Host "python: $py"
+          & $py --version
           $chrome = Join-Path $env:PLAYWRIGHT_BROWSERS_PATH 'chromium-1208\chrome-win64\chrome.exe'
           if (Test-Path $chrome) {
             Write-Host "browser: $chrome"
           } else {
             Write-Host "browser missing -> installing"
-            python -m patchright install chromium
+            & $py -m patchright install chromium
           }
-          python -c "import ddddocr; print('ddddocr ok')"
+          & $py -c "import ddddocr; print('ddddocr ok')"
+          Write-Host "cwd: $(Get-Location)"
 
       - name: 执行签到
-        shell: pwsh
-        run: python sign.py
+        run: |
+          [Console]::OutputEncoding = [Text.Encoding]::UTF8
+          $py = 'D:\Python311\python.exe'
+          if (-not (Test-Path $py)) { $py = 'python' }
+          & $py sign.py
+          $rc = $LASTEXITCODE
+          Write-Host "EXIT_CODE=$rc"
+          exit $rc
 
       - name: 上传调试产物（截图 + HTML）
         if: always()
@@ -84,18 +97,18 @@ jobs:
 
       - name: 回写新 Cookie 到 secret（自动登录后自动续期）
         if: always()
-        shell: pwsh
         env:
           GH_TOKEN: ${{ secrets.GH_PAT }}
         run: |
-          if (-not $env:GH_TOKEN) { Write-Host "未配置 GH_PAT，跳过自动续期"; exit 0 }
-          if (-not (Test-Path new_cookie.txt)) { Write-Host "本次没有产生新 Cookie，跳过"; exit 0 }
+          [Console]::OutputEncoding = [Text.Encoding]::UTF8
+          if (-not $env:GH_TOKEN) { Write-Host "GH_PAT not set, skip cookie persist"; exit 0 }
+          if (-not (Test-Path new_cookie.txt)) { Write-Host "no new cookie this run, skip"; exit 0 }
           $c = (Get-Content new_cookie.txt -Raw).Trim()
-          if (-not $c) { Write-Host "new_cookie.txt 为空，跳过"; exit 0 }
+          if (-not $c) { Write-Host "new_cookie.txt empty, skip"; exit 0 }
           $gh = 'C:\Program Files\GitHub CLI\gh.exe'
           if (-not (Test-Path $gh)) { $gh = 'gh' }
           & $gh secret set PJ52_COOKIE --repo "$env:GITHUB_REPOSITORY" --body $c
-          Write-Host "已把新 Cookie 写回 PJ52_COOKIE"
+          Write-Host "cookie persisted to PJ52_COOKIE"
 
   # ───────────────────────── 兜底跑道：托管 runner ─────────────────────────
   sign-cloud:
