@@ -1,13 +1,9 @@
 name: 52pojie daily sign
 
-# 双跑道设计：
-#   sign-local  —— 跑在自建 Windows runner（本机服务，家宽 IP）。52pojie 的创宇盾对数据中心 IP
-#                  （GitHub 托管 runner 是 Azure）会直接给「滑动拼图」，家宽 IP 通常连验证码都不给。
-#                  这是主跑道。
-#   sign-cloud  —— GitHub 托管 ubuntu runner，仅在本机跑道失败（或手动勾 use_cloud）时兜底。
-#
-# 注意：本机 runner 以 NT AUTHORITY\NETWORK SERVICE 运行，机器上没有 pwsh（PowerShell 7），
-# 所以所有 shell 用 powershell 5.1，并显式绕过执行策略。
+# 主跑道：GitHub 托管 runner（ubuntu-latest）。
+#   创宇盾对数据中心 IP 会下发「滑动拼图」，sign.py 里的 solve_slider() 会自动过：
+#   块位移 = 滑块位移 × 13/14（CSS 缩放），缺口用 ccoeff + 边缘模板投票定位。
+# 备用跑道：自建 Windows runner（家宽 IP，通常连验证码都不给），手动勾 local_only 才跑。
 
 on:
   schedule:
@@ -22,8 +18,8 @@ on:
         description: "只测 Telegram 通知通道（不访问站点）"
         type: boolean
         default: false
-      use_cloud:
-        description: "强制用 GitHub 托管 runner（数据中心 IP，可能要求滑动拼图）"
+      local_only:
+        description: "改用自建 Windows runner（家宽 IP，需本机在线）"
         type: boolean
         default: false
 
@@ -35,9 +31,67 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
-  # ───────────────────────── 主跑道：家宽 IP ─────────────────────────
+  # ───────────────────────── 主跑道：GitHub 托管 runner ─────────────────────────
+  sign-cloud:
+    if: ${{ !inputs.local_only }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - name: 安装依赖与浏览器内核
+        run: |
+          python -m pip install --upgrade pip
+          sudo apt-get update -qq && sudo apt-get install -y -qq libgl1 libglib2.0-0 || true
+          pip install -r requirements.txt
+          python -m patchright install --with-deps chromium || python -m playwright install --with-deps chromium
+
+      - name: 执行签到
+        env:
+          PJ52_COOKIE: ${{ secrets.PJ52_COOKIE }}
+          PJ52_USER: ${{ secrets.PJ52_USER }}
+          PJ52_PASS: ${{ secrets.PJ52_PASS }}
+          PJ52_DEBUG: "1"
+          PJ52_DRY_RUN: ${{ inputs.dry_run && '1' || '' }}
+          PJ52_TEST_NOTIFY: ${{ inputs.test_notify && '1' || '' }}
+          TG_BOT_TOKEN: ${{ secrets.TG_BOT_TOKEN }}
+          TG_CHAT_ID: ${{ secrets.TG_CHAT_ID }}
+          TG_NOTIFY_LEVEL: ${{ vars.TG_NOTIFY_LEVEL || 'all' }}
+        run: |
+          python sign.py
+          rc=$?
+          echo "EXIT_CODE=$rc"
+          exit $rc
+
+      - name: 上传调试产物（截图 + HTML）
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: debug-cloud-${{ github.run_id }}
+          path: debug/
+          if-no-files-found: ignore
+          retention-days: 7
+
+      - name: 回写新 Cookie 到 secret（自动登录后自动续期）
+        if: always()
+        env:
+          GH_TOKEN: ${{ secrets.GH_PAT }}
+        run: |
+          if [ -z "${GH_TOKEN:-}" ]; then echo "GH_PAT not set, skip cookie persist"; exit 0; fi
+          if [ ! -f new_cookie.txt ]; then echo "no new cookie this run, skip"; exit 0; fi
+          c="$(tr -d '\r\n' < new_cookie.txt)"
+          if [ -z "$c" ]; then echo "new_cookie.txt empty, skip"; exit 0; fi
+          gh secret set PJ52_COOKIE --repo "$GITHUB_REPOSITORY" --body "$c"
+          echo "cookie persisted to PJ52_COOKIE"
+
+  # ───────────────────────── 备用跑道：自建 Windows runner（家宽 IP） ─────────────────────────
   sign-local:
-    if: ${{ !inputs.use_cloud }}
+    if: ${{ inputs.local_only }}
     runs-on: [self-hosted, windows, local]
     timeout-minutes: 20
     defaults:
@@ -48,7 +102,6 @@ jobs:
       PYTHONIOENCODING: utf-8
       PYTHONUTF8: "1"
       # 本机 runner 以 NETWORK SERVICE 运行，读不到用户级系统代理；Telegram 直连会被重置。
-      # 显式指向本机代理端口（不影响 52pojie：Chromium 不读这两个变量，且 NO_PROXY 已排除站点）。
       HTTP_PROXY: http://127.0.0.1:7897
       HTTPS_PROXY: http://127.0.0.1:7897
       NO_PROXY: www.52pojie.cn,static.52pojie.cn,localhost,127.0.0.1
@@ -115,46 +168,3 @@ jobs:
           if (-not (Test-Path $gh)) { $gh = 'gh' }
           & $gh secret set PJ52_COOKIE --repo "$env:GITHUB_REPOSITORY" --body $c
           Write-Host "cookie persisted to PJ52_COOKIE"
-
-  # ───────────────────────── 兜底跑道：托管 runner ─────────────────────────
-  sign-cloud:
-    needs: sign-local
-    if: ${{ always() && (inputs.use_cloud || needs.sign-local.result != 'success') }}
-    runs-on: ubuntu-latest
-    timeout-minutes: 15
-    steps:
-      - uses: actions/checkout@v4
-
-      - uses: actions/setup-python@v5
-        with:
-          python-version: "3.12"
-          cache: pip
-
-      - name: 安装依赖与浏览器内核
-        run: |
-          python -m pip install --upgrade pip
-          sudo apt-get update -qq && sudo apt-get install -y -qq libgl1 libglib2.0-0 || true
-          pip install -r requirements.txt
-          python -m patchright install --with-deps chromium || python -m playwright install --with-deps chromium
-
-      - name: 执行签到（云通道）
-        env:
-          PJ52_COOKIE: ${{ secrets.PJ52_COOKIE }}
-          PJ52_USER: ${{ secrets.PJ52_USER }}
-          PJ52_PASS: ${{ secrets.PJ52_PASS }}
-          PJ52_DEBUG: "1"
-          PJ52_DRY_RUN: ${{ inputs.dry_run && '1' || '' }}
-          PJ52_TEST_NOTIFY: ${{ inputs.test_notify && '1' || '' }}
-          TG_BOT_TOKEN: ${{ secrets.TG_BOT_TOKEN }}
-          TG_CHAT_ID: ${{ secrets.TG_CHAT_ID }}
-          TG_NOTIFY_LEVEL: ${{ vars.TG_NOTIFY_LEVEL || 'all' }}
-        run: python sign.py
-
-      - name: 上传调试产物（截图 + HTML）
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: debug-cloud-${{ github.run_id }}
-          path: debug/
-          if-no-files-found: ignore
-          retention-days: 7
