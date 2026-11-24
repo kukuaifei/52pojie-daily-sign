@@ -317,6 +317,163 @@ def solve_captcha(page, max_rounds=10):
     return False
 
 
+SLIDER_JS = r"""
+() => {
+  const cs = [...document.querySelectorAll('#captcha canvas')];
+  if (cs.length < 2) return { err: 'no canvas', n: cs.length };
+  const s = document.querySelector('.slider');
+  const srect = s ? s.getBoundingClientRect() : null;
+  const toB64 = (c) => {
+    const cv = document.createElement('canvas');
+    cv.width = c.width; cv.height = c.height;
+    cv.getContext('2d').drawImage(c, 0, 0);
+    return cv.toDataURL('image/png').split(',')[1];
+  };
+  const d = cs[1].getContext('2d').getImageData(0, 0, cs[1].width, cs[1].height).data;
+  let x0 = 1e9, y0 = 1e9, x1 = -1, y1 = -1;
+  for (let i = 3, p = 0; i < d.length; i += 4, p++) {
+    if (d[i] > 200) {
+      const px = p % cs[1].width, py = (p / cs[1].width) | 0;
+      if (px < x0) x0 = px; if (px > x1) x1 = px;
+      if (py < y0) y0 = py; if (py > y1) y1 = py;
+    }
+  }
+  return {
+    bg: toB64(cs[0]), blk: toB64(cs[1]),
+    block: x1 >= 0 ? { x: x0, y: y0, w: x1 - x0 + 1, h: y1 - y0 + 1 } : null,
+    slider: srect ? { x: srect.x, y: srect.y, w: srect.width, h: srect.height } : null,
+  };
+}
+"""
+
+# diag2 实测（run 45353859395）：slider_left 200px -> block_left 185.714px
+# 比例恒为 13/14；canvas0 显示 322x182、内部 320x180，故 322/320
+SLIDER_SCALE = (322.0 / 320.0) * (14.0 / 13.0)
+
+
+def _b64_img(s):
+    import cv2
+    import numpy as np
+    return cv2.imdecode(np.frombuffer(base64.b64decode(s), np.uint8), cv2.IMREAD_UNCHANGED)
+
+
+def _find_gap(bg, blk, box):
+    """返回缺口在 canvas 内的 x；ccoeff 为主、edge 模板为辅投票"""
+    import cv2
+    import numpy as np
+    bg3 = bg[:, :, :3]
+    gray = cv2.cvtColor(bg3, cv2.COLOR_BGR2GRAY)
+    alpha = blk[:, :, 3] if blk.shape[2] == 4 else np.full(blk.shape[:2], 255, np.uint8)
+    x0, y0, w, h = box["x"], box["y"], box["w"], box["h"]
+    patch = blk[y0:y0 + h, x0:x0 + w, :3]
+    mask = (alpha[y0:y0 + h, x0:x0 + w] > 200).astype(np.uint8) * 255
+    cands = []
+    try:
+        r = cv2.matchTemplate(bg3, patch, cv2.TM_CCOEFF_NORMED, mask=mask)
+        _, mv, _, ml = cv2.minMaxLoc(r)
+        cands.append(("ccoeff", int(ml[0]), float(mv)))
+    except Exception:
+        pass
+    try:
+        pg = cv2.cvtColor(patch, cv2.COLOR_BGR2GRAY)
+        r = cv2.matchTemplate(cv2.Canny(gray, 50, 150), cv2.Canny(pg, 50, 150), cv2.TM_CCORR_NORMED)
+        _, mv, _, ml = cv2.minMaxLoc(r)
+        cands.append(("edge", int(ml[0]), float(mv)))
+    except Exception:
+        pass
+    if not cands:
+        return None, "no candidate"
+    if len(cands) == 2 and abs(cands[0][1] - cands[1][1]) <= 15:
+        return int(round((cands[0][1] + cands[1][1]) / 2)), "agree %s" % [c[1] for c in cands]
+    best = sorted(cands, key=lambda t: -t[2])[0]
+    return best[1], "pick %s from %s" % (best[0], [(c[0], c[1]) for c in cands])
+
+
+def _human_track(distance):
+    import random
+    track, cur, v = [], 0.0, 0.0
+    mid = distance * 0.7
+    n = 0
+    while cur < distance and n < 120:
+        a = random.uniform(1.6, 3.2) if cur < mid else -random.uniform(2.2, 4.0)
+        v = min(max(0.6, v + a), 22.0)
+        step = max(1.0, v + random.uniform(-0.6, 0.6))
+        if cur + step > distance:
+            step = distance - cur
+        cur += step
+        track.append(round(cur, 2))
+        n += 1
+    if not track or track[-1] < distance:
+        track.append(distance)
+    return track
+
+
+def _slide_drag(page, sl, offset):
+    import random
+    sx = sl["x"] + sl["w"] / 2
+    sy = sl["y"] + sl["h"] / 2
+    page.mouse.move(sx, sy)
+    time.sleep(random.uniform(0.15, 0.35))
+    page.mouse.down()
+    time.sleep(random.uniform(0.12, 0.25))
+    for pos in _human_track(offset):
+        page.mouse.move(sx + pos, sy + random.uniform(-1.2, 1.2))
+        time.sleep(random.uniform(0.012, 0.035))
+    page.mouse.move(sx + offset + random.uniform(1, 3), sy)
+    time.sleep(0.08)
+    page.mouse.move(sx + offset, sy)
+    time.sleep(0.12)
+    page.mouse.up()
+
+
+def solve_slider(page, max_rounds=4):
+    """过创宇盾滑动拼图。成功返回 True。
+
+    位移换算：块(内部 x≈2) 要落到缺口 gap 处，滑块需位移
+        (gap - block_x) * 322/320 * 14/13
+    """
+    for rnd in range(1, max_rounds + 1):
+        try:
+            page.wait_for_selector("#captcha canvas", timeout=15000)
+        except Exception:
+            return False
+        time.sleep(2.0)
+        st = page.evaluate(SLIDER_JS)
+        if not st or st.get("err") or not st.get("block") or not st.get("slider"):
+            log("滑块第 %d 轮：DOM 未就绪（%s）" % (rnd, (st or {}).get("err")), "!")
+            time.sleep(2)
+            continue
+        bg = _b64_img(st["bg"])
+        blk = _b64_img(st["blk"])
+        if bg is None or blk is None:
+            log("滑块第 %d 轮：图解码失败" % rnd, "!")
+            continue
+        gap, detail = _find_gap(bg, blk, st["block"])
+        if gap is None:
+            log("滑块第 %d 轮：缺口未定位（%s）" % (rnd, detail), "!")
+            continue
+        off = int(round((gap - st["block"]["x"]) * SLIDER_SCALE))
+        log("滑块第 %d 轮：gap=%d block_x=%d → 拖 %dpx（%s）"
+            % (rnd, gap, st["block"]["x"], off, detail))
+        _slide_drag(page, st["slider"], off)
+
+        for _ in range(10):
+            time.sleep(1.2)
+            if "waf_slider_verify" not in page.url:
+                log("滑块通过 → %s" % page.url)
+                return True
+            s2 = page.evaluate(SLIDER_JS)
+            if s2 and not s2.get("err") and s2.get("block"):
+                break
+        shot(page, "slider_%d" % rnd)
+        try:
+            page.reload(wait_until="domcontentloaded", timeout=60000)
+        except Exception:
+            pass
+        time.sleep(3)
+    return False
+
+
 def open_page(page, url, tag="", referer=None, tries=4):
     """打开页面，依次处理：JS 挑战（自动解）→ 文字验证码（ddddocr）→ 正常内容"""
     import random
@@ -339,6 +496,15 @@ def open_page(page, url, tag="", referer=None, tries=4):
                     if st and not st.get("challenge") and not st.get("verify") and st.get("len", 0) > 300:
                         return st
                 continue
+            if st and st.get("challenge") and not st.get("verify"):
+                # 滑动拼图（创宇盾对数据中心 IP 下发滑块，不是文字验证码）
+                if solve_slider(page):
+                    try:
+                        page.goto(url, **kw)
+                    except Exception:
+                        pass
+                    time.sleep(2)
+                    continue
             if st and not st.get("challenge") and st.get("len", 0) > 300:
                 return st
             if k == 4:  # 等到一半还没过 → 主动重发一次请求
