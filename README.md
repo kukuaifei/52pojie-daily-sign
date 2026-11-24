@@ -3,7 +3,7 @@
 吾爱破解（www.52pojie.cn）每日「签到红包任务」的全自动签到。**双跑道**：
 
 - **`sign-local`** —— 跑在本机 **self-hosted Windows runner** 上，出网是家宽 IP。52pojie 的创宇盾对家宽 IP 基本不拦，成功率最高。**这是主跑道。**
-- **`sign-cloud`** —— GitHub 托管 ubuntu runner（Azure 段），仅在本机跑道失败时兜底。该段 IP 会被升级成「滑动拼图」，能不能过看运气。
+- **`sign-cloud`** —— GitHub 托管 ubuntu runner（Azure 段），**默认主跑道**。该段 IP 会被升级成「滑动拼图」，现已由 `solve_slider()` 自动通过（实测两次均一次过）。
 
 **已部署**：<https://github.com/kukuaifei/52pojie-daily-sign>（public）
 **最近一次验证**：run [45349262352](https://github.com/kukuaifei/52pojie-daily-sign/actions/runs/45349262352) ✓ ——
@@ -19,7 +19,7 @@ Telegram 通知也已打通（run [45350550471](https://github.com/kukuaifei/52p
 | ① JS 挑战 | 纯 HTTP（requests / curl_cffi / 甚至 playwright 的 `ctx.request`）拿到的是 32528 字节 `Please enable JavaScript`，页面上没有一个 `do=apply` | **patchright + 真 Chromium 渲染**，让挑战在浏览器里自己解开 |
 | ② 文字验证码 | 数据中心 IP（如 Actions 的 Azure 段）直接给 `waf_text_verify.html`：「请完成安全验证! IP:xxx」+ 215×80 图形验证码 | **ddddocr 识别 → 填入 → 提交**，错了自动换图重试（实测 1–2 次内通过，上限 10 次） |
 | ③ GBK 乱码 | 本站 `charset=gbk`，Playwright 回传的中文在 Python 侧全是「锟斤拷」 | 所有中文判断放进**页面内 JS**，Python 只收布尔值/数字/URL |
-| ④ 滑动拼图 | **2026-11-24 起**，数据中心 IP（如 Actions 的 Azure 段 `20.120.164.105`）从文字验证码**升级为滑块**：「向右滑动填充拼图」，ddddocr 完全无效 | 不硬刚：改用**家宽 IP 的 self-hosted runner**（实测本机直连首页 76KB 正常内容，连验证码都不给） |
+| ④ 滑动拼图 | **2026-11-24 起**，数据中心 IP 从文字验证码**升级为滑块**：320x180 背景 canvas + 56x56 拼图块 + 40x40 拖动条 | **已自动过**：`solve_slider()` 用 ccoeff + 边缘模板投票定位缺口，按 `块位移 = 滑块位移 × 13/14` 的实测缩放系数换算拖动距离，一次通过（见下节） |
 
 > ④ 是这套东西现在必须自建 runner 的唯一原因。本地 IP 实测：`HTTP 200 / 76821 字节`，正文无 `waf_` / `安全验证` / `wzws` 任何痕迹。
 > Azure 段则稳定吃滑块——那不是代码能解决的问题，是 IP 信誉问题。
@@ -36,6 +36,49 @@ Telegram 通知也已打通（run [45350550471](https://github.com/kukuaifei/52p
 3. **验证码图片必须用 canvas 取原图**
    `<img>` 被 CSS 缩成 80×30，`element.screenshot()` 出来的图 ddddocr 几乎认不出；
    `GET_CAPTCHA_JS` 按 `naturalWidth/naturalHeight` 重绘到 canvas，得到无损 215×80 PNG。
+
+## 滑动拼图自动通过（`solve_slider`）
+
+创宇盾对 Azure 段 IP 下发的是滑块，不是文字验证码，dddocr 对它无效。实现分三步：
+
+**1. 读数**：页面里两个 `320x180` canvas —— `canvas[0]` 背景、`canvas[1].block` 拼图块层。用 `getImageData` 扫 alpha>200 的像素拿到块的 bbox（初始恒为 `x=2`），`toDataURL` 取两图原图。
+
+**2. 定位缺口**：`cv2.matchTemplate` 用块图（带 alpha mask）去背景图里找两处：
+- `TM_CCOEFF_NORMED` + mask
+- Canny 边缘图 + `TM_CCORR_NORMED`
+
+两者差 ≤15px 取平均，否则取相关性高的。*（`TM_CCORR_NORMED` 在彩色图上会跑飞，例如真值 170 时给 235，已弃用。）*
+
+**3. 换算拖动距离** —— 这里是坑：**块不会 1:1 跟手**。
+
+`_diag2.py` 实测（run 45353859395）：
+
+| 鼠标位移 | `.slider` left | `canvas.block` left | 比值 |
+|---|---|---|---|
+| 10px | 10px | 9.28571px | 0.928571 |
+| 50px | 50px | 46.4286px | 0.928571 |
+| 110px | 110px | 102.143px | 0.928571 |
+| 200px | 200px | 185.714px | **0.928571** |
+
+`0.928571 = 13/14`（canvas 显示 322x182、内部 320x180）。所以：
+
+```
+滑块位移 = (缺口x - 块x) × 322/320 × 14/13 ≈ (缺口x - 2) × 1.0837
+```
+
+之前直接拖 `缺口x` 差了 8.4%，每次都差 10~20px 失败；服务端回显的 `?captcha=` 正是「块实际位移 × 13/14」，也印证了这个系数。
+
+**4. 轨迹**：加速-减速曲线 + 每步 y 抖动 ±1.2px + 末端过冲 2px 回正，`mousedown` 后先停 120~250ms 再动。
+
+实测（云 runner）：
+```
+滑块第 1 轮：gap=223 block_x=2 → 拖 239px（agree [223, 223]）
+滑块通过 → https://www.52pojie.cn/
+```
+```
+滑块第 1 轮：gap=253 block_x=2 → 拖 272px（agree [258, 248]）
+滑块通过 → https://www.52pojie.cn/
+```
 
 ## 本机 runner 部署（`sign-local` 跑道）
 
