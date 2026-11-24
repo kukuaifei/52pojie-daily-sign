@@ -47,6 +47,12 @@ jobs:
       PLAYWRIGHT_BROWSERS_PATH: D:\ms-playwright
       PYTHONIOENCODING: utf-8
       PYTHONUTF8: "1"
+      # 本机 runner 以 NETWORK SERVICE 运行，读不到用户级系统代理；Telegram 直连会被重置。
+      # 显式指向本机代理端口（不影响 52pojie：Chromium 不读这两个变量，且 NO_PROXY 已排除站点）。
+      HTTP_PROXY: http://127.0.0.1:7897
+      HTTPS_PROXY: http://127.0.0.1:7897
+      NO_PROXY: www.52pojie.cn,static.52pojie.cn,localhost,127.0.0.1
+      TG_INSECURE_SSL: "1"
       PJ52_COOKIE: ${{ secrets.PJ52_COOKIE }}
       PJ52_USER: ${{ secrets.PJ52_USER }}
       PJ52_PASS: ${{ secrets.PJ52_PASS }}
