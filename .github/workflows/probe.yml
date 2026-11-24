@@ -1,8 +1,6 @@
 name: probe waf dom
 
-# 一次性诊断用：把创宇盾验证页的真实 DOM / 截图 dump 成 artifact。
-# 不参与签到，跑完看完就可以删。
-
+# 涓€娆℃€ц瘖鏂敤锛氭妸鍒涘畤鐩鹃獙璇侀〉鐨勭湡瀹?DOM / 鎴浘 dump 鎴?artifact銆?# 涓嶅弬涓庣鍒帮紝璺戝畬鐪嬪畬灏卞彲浠ュ垹銆?
 on:
   workflow_dispatch:
 
@@ -21,19 +19,19 @@ jobs:
           python-version: "3.12"
           cache: pip
 
-      - name: 安装依赖与浏览器内核
+      - name: 瀹夎渚濊禆涓庢祻瑙堝櫒鍐呮牳
         run: |
           python -m pip install --upgrade pip
           sudo apt-get update -qq && sudo apt-get install -y -qq libgl1 libglib2.0-0 || true
           pip install patchright
           python -m patchright install --with-deps chromium
 
-      - name: 探测验证页 DOM
+      - name: 鎺㈡祴楠岃瘉椤?DOM
         env:
           PYTHONIOENCODING: utf-8
-        run: python _probe_slide.py
+        run: python _probe_canvas.py
 
-      - name: 上传探测产物
+      - name: 涓婁紶鎺㈡祴浜х墿
         if: always()
         uses: actions/upload-artifact@v4
         with:
