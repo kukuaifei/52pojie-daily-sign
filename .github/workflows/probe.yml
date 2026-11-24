@@ -1,6 +1,8 @@
 name: probe waf dom
 
-# 娑撯偓濞嗏剝鈧嗙槚閺傤厾鏁ら敍姘Ω閸掓稑鐣ら惄楣冪崣鐠囦線銆夐惃鍕埂鐎?DOM / 閹搭亜娴?dump 閹?artifact閵?# 娑撳秴寮稉搴ｎ劮閸掑府绱濈捄鎴濈暚閻鐣亸鍗炲讲娴犮儱鍨归妴?
+# Diagnostic only. Dumps the chuangyudun slider captcha DOM / canvas pixels,
+# and exercises the slider solver. Not part of the sign flow.
+
 on:
   workflow_dispatch:
 
@@ -19,18 +21,19 @@ jobs:
           python-version: "3.12"
           cache: pip
 
-      - name: 鐎瑰顥婃笟婵婄娑撳孩绁荤憴鍫濇珤閸愬懏鐗?        run: |
+      - name: install deps and browser
+        run: |
           python -m pip install --upgrade pip
           sudo apt-get update -qq && sudo apt-get install -y -qq libgl1 libglib2.0-0 || true
-          pip install patchright
+          pip install patchright opencv-python-headless numpy
           python -m patchright install --with-deps chromium
 
-      - name: 閹恒垺绁存宀冪槈妞?DOM
+      - name: run slider solver
         env:
           PYTHONIOENCODING: utf-8
         run: python _test_slider.py
 
-      - name: 娑撳﹣绱堕幒銏＄ゴ娴溠呭⒖
+      - name: upload artifacts
         if: always()
         uses: actions/upload-artifact@v4
         with:
