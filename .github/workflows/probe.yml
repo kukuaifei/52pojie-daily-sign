@@ -31,7 +31,7 @@ jobs:
       - name: run slider solver
         env:
           PYTHONIOENCODING: utf-8
-        run: python _diag2.py
+        run: python _test_slider3.py
 
       - name: upload artifacts
         if: always()
