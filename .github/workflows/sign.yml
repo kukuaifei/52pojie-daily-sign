@@ -1,25 +1,29 @@
-﻿name: 52pojie daily sign
+name: 52pojie daily sign
 
-# 鍙岃窇閬撹璁★細
-#   sign-local  鈥斺€?璺戝湪鑷缓 Windows runner锛堟湰鏈烘湇鍔★紝瀹跺 IP锛夈€?2pojie 鐨勫垱瀹囩浘瀵规暟鎹腑蹇?IP
-#                  锛圙itHub 鎵樼 runner 鏄?Azure锛変細鐩存帴缁欍€屾粦鍔ㄦ嫾鍥俱€嶏紝瀹跺 IP 閫氬父杩為獙璇佺爜閮戒笉缁欍€?#                  杩欐槸涓昏窇閬撱€?#   sign-cloud  鈥斺€?GitHub 鎵樼 ubuntu runner锛屼粎鍦ㄦ湰鏈鸿窇閬撳け璐ワ紙鎴栨墜鍔ㄥ嬀 use_cloud锛夋椂鍏滃簳銆?#
-# 娉ㄦ剰锛氭湰鏈?runner 浠?NT AUTHORITY\NETWORK SERVICE 杩愯锛屾満鍣ㄤ笂娌℃湁 pwsh锛圥owerShell 7锛夛紝
-# 鎵€浠ユ墍鏈?shell 鐢?powershell锛?.1锛夈€?
+# 双跑道设计：
+#   sign-local  —— 跑在自建 Windows runner（本机服务，家宽 IP）。52pojie 的创宇盾对数据中心 IP
+#                  （GitHub 托管 runner 是 Azure）会直接给「滑动拼图」，家宽 IP 通常连验证码都不给。
+#                  这是主跑道。
+#   sign-cloud  —— GitHub 托管 ubuntu runner，仅在本机跑道失败（或手动勾 use_cloud）时兜底。
+#
+# 注意：本机 runner 以 NT AUTHORITY\NETWORK SERVICE 运行，机器上没有 pwsh（PowerShell 7），
+# 所以所有 shell 用 powershell 5.1，并显式绕过执行策略。
+
 on:
   schedule:
-    - cron: "40 1 * * *"   # UTC 01:40 = 鍖椾含 09:40
+    - cron: "40 1 * * *"   # UTC 01:40 = 北京 09:40
   workflow_dispatch:
     inputs:
       dry_run:
-        description: "鍙帰娴嬩笉鎻愪氦锛堜笉浼氱湡鐨勭鍒帮級"
+        description: "只探测不提交（不会真的签到）"
         type: boolean
         default: false
       test_notify:
-        description: "鍙祴 Telegram 閫氱煡閫氶亾锛堜笉璁块棶绔欑偣锛?
+        description: "只测 Telegram 通知通道（不访问站点）"
         type: boolean
         default: false
       use_cloud:
-        description: "寮哄埗鐢?GitHub 鎵樼 runner锛堟暟鎹腑蹇?IP锛屽彲鑳借姹傛粦鍔ㄦ嫾鍥撅級"
+        description: "强制用 GitHub 托管 runner（数据中心 IP，可能要求滑动拼图）"
         type: boolean
         default: false
 
@@ -31,14 +35,14 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
-  # 鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€ 涓昏窇閬擄細瀹跺 IP 鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€
+  # ───────────────────────── 主跑道：家宽 IP ─────────────────────────
   sign-local:
     if: ${{ !inputs.use_cloud }}
     runs-on: [self-hosted, windows, local]
     timeout-minutes: 20
     defaults:
       run:
-        shell: powershell -ExecutionPolicy Bypass -Command ". '{0}'"
+        shell: 'powershell -ExecutionPolicy Bypass -File {0}'
     env:
       PLAYWRIGHT_BROWSERS_PATH: D:\ms-playwright
       PYTHONIOENCODING: utf-8
@@ -55,7 +59,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: 鐜鑷
+      - name: 环境自检
         run: |
           [Console]::OutputEncoding = [Text.Encoding]::UTF8
           $py = 'D:\Python311\python.exe'
@@ -72,7 +76,7 @@ jobs:
           & $py -c "import ddddocr; print('ddddocr ok')"
           Write-Host "cwd: $(Get-Location)"
 
-      - name: 鎵ц绛惧埌
+      - name: 执行签到
         run: |
           [Console]::OutputEncoding = [Text.Encoding]::UTF8
           $py = 'D:\Python311\python.exe'
@@ -82,7 +86,8 @@ jobs:
           Write-Host "EXIT_CODE=$rc"
           exit $rc
 
-      - name: 涓婁紶璋冭瘯浜х墿锛堟埅鍥?+ HTML锛?        if: always()
+      - name: 上传调试产物（截图 + HTML）
+        if: always()
         uses: actions/upload-artifact@v4
         with:
           name: debug-local-${{ github.run_id }}
@@ -90,7 +95,8 @@ jobs:
           if-no-files-found: ignore
           retention-days: 7
 
-      - name: 鍥炲啓鏂?Cookie 鍒?secret锛堣嚜鍔ㄧ櫥褰曞悗鑷姩缁湡锛?        if: always()
+      - name: 回写新 Cookie 到 secret（自动登录后自动续期）
+        if: always()
         env:
           GH_TOKEN: ${{ secrets.GH_PAT }}
         run: |
@@ -104,7 +110,7 @@ jobs:
           & $gh secret set PJ52_COOKIE --repo "$env:GITHUB_REPOSITORY" --body $c
           Write-Host "cookie persisted to PJ52_COOKIE"
 
-  # 鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€ 鍏滃簳璺戦亾锛氭墭绠?runner 鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€
+  # ───────────────────────── 兜底跑道：托管 runner ─────────────────────────
   sign-cloud:
     needs: sign-local
     if: ${{ always() && (inputs.use_cloud || needs.sign-local.result != 'success') }}
@@ -118,14 +124,15 @@ jobs:
           python-version: "3.12"
           cache: pip
 
-      - name: 瀹夎渚濊禆涓庢祻瑙堝櫒鍐呮牳
+      - name: 安装依赖与浏览器内核
         run: |
           python -m pip install --upgrade pip
           sudo apt-get update -qq && sudo apt-get install -y -qq libgl1 libglib2.0-0 || true
           pip install -r requirements.txt
           python -m patchright install --with-deps chromium || python -m playwright install --with-deps chromium
 
-      - name: 鎵ц绛惧埌锛堜簯閫氶亾锛?        env:
+      - name: 执行签到（云通道）
+        env:
           PJ52_COOKIE: ${{ secrets.PJ52_COOKIE }}
           PJ52_USER: ${{ secrets.PJ52_USER }}
           PJ52_PASS: ${{ secrets.PJ52_PASS }}
@@ -137,7 +144,8 @@ jobs:
           TG_NOTIFY_LEVEL: ${{ vars.TG_NOTIFY_LEVEL || 'all' }}
         run: python sign.py
 
-      - name: 涓婁紶璋冭瘯浜х墿锛堟埅鍥?+ HTML锛?        if: always()
+      - name: 上传调试产物（截图 + HTML）
+        if: always()
         uses: actions/upload-artifact@v4
         with:
           name: debug-cloud-${{ github.run_id }}
