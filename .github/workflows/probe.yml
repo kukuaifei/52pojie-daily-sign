@@ -1,6 +1,6 @@
 name: probe waf dom
 
-# 涓€娆℃€ц瘖鏂敤锛氭妸鍒涘畤鐩鹃獙璇侀〉鐨勭湡瀹?DOM / 鎴浘 dump 鎴?artifact銆?# 涓嶅弬涓庣鍒帮紝璺戝畬鐪嬪畬灏卞彲浠ュ垹銆?
+# 娑撯偓濞嗏剝鈧嗙槚閺傤厾鏁ら敍姘Ω閸掓稑鐣ら惄楣冪崣鐠囦線銆夐惃鍕埂鐎?DOM / 閹搭亜娴?dump 閹?artifact閵?# 娑撳秴寮稉搴ｎ劮閸掑府绱濈捄鎴濈暚閻鐣亸鍗炲讲娴犮儱鍨归妴?
 on:
   workflow_dispatch:
 
@@ -19,19 +19,18 @@ jobs:
           python-version: "3.12"
           cache: pip
 
-      - name: 瀹夎渚濊禆涓庢祻瑙堝櫒鍐呮牳
-        run: |
+      - name: 鐎瑰顥婃笟婵婄娑撳孩绁荤憴鍫濇珤閸愬懏鐗?        run: |
           python -m pip install --upgrade pip
           sudo apt-get update -qq && sudo apt-get install -y -qq libgl1 libglib2.0-0 || true
           pip install patchright
           python -m patchright install --with-deps chromium
 
-      - name: 鎺㈡祴楠岃瘉椤?DOM
+      - name: 閹恒垺绁存宀冪槈妞?DOM
         env:
           PYTHONIOENCODING: utf-8
-        run: python _probe_canvas.py
+        run: python _test_slider.py
 
-      - name: 涓婁紶鎺㈡祴浜х墿
+      - name: 娑撳﹣绱堕幒銏＄ゴ娴溠呭⒖
         if: always()
         uses: actions/upload-artifact@v4
         with:
